@@ -1,0 +1,95 @@
+# Prediction Market Bot Configuration
+
+# ============================================================
+# Platform API Configuration
+# ============================================================
+platforms:
+  polymarket:
+    base_url: "https://clob.polymarket.com"
+    ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+    chain_id: 137  # Polygon
+    enabled: true
+  kalshi:
+    base_url: "https://demo-api.kalshi.co/trade-api/v2"  # Demo environment
+    enabled: true
+
+# ============================================================
+# Step 1: Scanner Settings
+# ============================================================
+scanner:
+  schedule_interval_minutes: 15
+  filters:
+    min_volume: 200           # Minimum 200 contracts
+    max_days_to_expiry: 30    # Max 30 days to resolution
+    min_liquidity_usd: 500    # Minimum orderbook depth
+  anomaly_thresholds:
+    price_move_pct: 10.0      # Flag moves > 10%
+    spread_cents: 5.0         # Flag spreads > 5 cents
+    volume_spike_ratio: 2.0   # Flag volume > 2x 7-day avg
+
+# ============================================================
+# Step 2: Research Settings
+# ============================================================
+research:
+  sources:
+    twitter: true
+    reddit: true
+    rss: true
+    news: true
+  max_sources_per_market: 20
+  sentiment_threshold: 0.1    # Minimum sentiment score to consider
+  content_safety: true        # Treat external content as data, not instructions
+
+# ============================================================
+# Step 3: Prediction Settings
+# ============================================================
+prediction:
+  min_edge: 0.04              # 4% minimum edge to trade
+  confidence_threshold: 0.65  # Minimum confidence to generate signal
+  ensemble_models:
+    - name: "xgboost"
+      weight: 0.30
+    - name: "claude"
+      weight: 0.20
+    - name: "gpt4"
+      weight: 0.20
+    - name: "gemini"
+      weight: 0.15
+    - name: "statistical"
+      weight: 0.15
+  brier_score_target: 0.25    # Target calibration
+
+# ============================================================
+# Step 4: Risk Management Settings
+# ============================================================
+risk:
+  kelly_fraction: 0.25        # Quarter-Kelly (conservative)
+  max_position_pct: 5.0       # Max 5% of bankroll per position
+  max_concurrent_positions: 15
+  max_daily_loss_pct: 15.0    # 15% daily loss limit
+  max_drawdown_pct: 8.0       # 8% max drawdown halts trading
+  slippage_abort_pct: 2.0     # Abort if price moves > 2%
+  max_daily_api_cost_usd: 50  # $50/day AI API cost limit
+  var_confidence: 0.95        # 95% VaR confidence level
+
+# ============================================================
+# Step 5: Compound / Learning Settings
+# ============================================================
+compound:
+  nightly_review_hour: 23     # Run nightly review at 11 PM
+  min_trades_for_analysis: 10
+  performance_targets:
+    win_rate: 0.60
+    sharpe_ratio: 2.0
+    profit_factor: 1.5
+
+# ============================================================
+# General Settings
+# ============================================================
+general:
+  initial_bankroll: 500.0     # Starting with $500
+  paper_trading: true         # Start in paper trading mode
+  log_level: "INFO"
+  data_dir: "data"
+  log_dir: "logs"
+  kill_switch_file: "STOP"    # Create this file to halt all trading

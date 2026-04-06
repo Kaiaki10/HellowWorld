@@ -1,0 +1,17 @@
+# Environment
+config/.env
+.env
+*.pyc
+__pycache__/
+.venv/
+venv/
+
+# Data & logs (local only)
+data/
+logs/
+STOP
+
+# IDE
+.vscode/
+.idea/
+*.swp
