@@ -22,6 +22,7 @@ import aiohttp
 from config import get_setting, get_env
 from modules.scanner import Market
 from modules.researcher import ResearchBrief
+from modules.cost_tracker import get_cost_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +186,11 @@ class LLMPredictor:
         if not api_key:
             return None
 
+        tracker = get_cost_tracker()
+        if not tracker.can_afford(tracker.estimate_call_cost("claude-haiku-4-5-20251001")):
+            logger.warning("Daily API budget exceeded, skipping Haiku call")
+            return None
+
         prompt = self._build_prompt(market_title, research_summary)
         try:
             async with session.post(
@@ -204,6 +210,13 @@ class LLMPredictor:
                 if resp.status == 200:
                     data = await resp.json()
                     text = data["content"][0]["text"]
+                    usage = data.get("usage", {})
+                    tracker.record_call(
+                        "claude-haiku-4-5-20251001",
+                        usage.get("input_tokens", 500),
+                        usage.get("output_tokens", 100),
+                        source="predictor",
+                    )
                     return self._parse_llm_response("haiku", text, 0.20, "cheap")
                 logger.warning(f"Haiku API returned {resp.status}")
         except Exception as e:
@@ -215,6 +228,11 @@ class LLMPredictor:
         """Full prediction via Claude Opus."""
         api_key = get_env("ANTHROPIC_API_KEY")
         if not api_key:
+            return None
+
+        tracker = get_cost_tracker()
+        if not tracker.can_afford(tracker.estimate_call_cost("claude-opus-4-20250514")):
+            logger.warning("Daily API budget exceeded, skipping Opus call")
             return None
 
         prompt = self._build_prompt(market_title, research_summary)
@@ -236,6 +254,13 @@ class LLMPredictor:
                 if resp.status == 200:
                     data = await resp.json()
                     text = data["content"][0]["text"]
+                    usage = data.get("usage", {})
+                    tracker.record_call(
+                        "claude-opus-4-20250514",
+                        usage.get("input_tokens", 800),
+                        usage.get("output_tokens", 200),
+                        source="predictor",
+                    )
                     return self._parse_llm_response("claude", text, 0.20, "full")
                 logger.warning(f"Claude API returned {resp.status}")
         except Exception as e:
@@ -247,6 +272,11 @@ class LLMPredictor:
         """Full prediction via GPT-4."""
         api_key = get_env("OPENAI_API_KEY")
         if not api_key:
+            return None
+
+        tracker = get_cost_tracker()
+        if not tracker.can_afford(tracker.estimate_call_cost("gpt-4o")):
+            logger.warning("Daily API budget exceeded, skipping GPT-4 call")
             return None
 
         prompt = self._build_prompt(market_title, research_summary)
@@ -268,6 +298,13 @@ class LLMPredictor:
                 if resp.status == 200:
                     data = await resp.json()
                     text = data["choices"][0]["message"]["content"]
+                    usage = data.get("usage", {})
+                    tracker.record_call(
+                        "gpt-4o",
+                        usage.get("prompt_tokens", 800),
+                        usage.get("completion_tokens", 200),
+                        source="predictor",
+                    )
                     return self._parse_llm_response("gpt4", text, 0.20, "full")
                 logger.warning(f"GPT-4 API returned {resp.status}")
         except Exception as e:
@@ -281,6 +318,11 @@ class LLMPredictor:
         if not api_key:
             return None
 
+        tracker = get_cost_tracker()
+        if not tracker.can_afford(tracker.estimate_call_cost("gemini-pro")):
+            logger.warning("Daily API budget exceeded, skipping Gemini call")
+            return None
+
         prompt = self._build_prompt(market_title, research_summary)
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={api_key}"
@@ -292,6 +334,13 @@ class LLMPredictor:
                 if resp.status == 200:
                     data = await resp.json()
                     text = data["candidates"][0]["content"]["parts"][0]["text"]
+                    usage = data.get("usageMetadata", {})
+                    tracker.record_call(
+                        "gemini-pro",
+                        usage.get("promptTokenCount", 800),
+                        usage.get("candidatesTokenCount", 200),
+                        source="predictor",
+                    )
                     return self._parse_llm_response("gemini", text, 0.15, "full")
                 logger.warning(f"Gemini API returned {resp.status}")
         except Exception as e:

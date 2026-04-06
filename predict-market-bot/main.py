@@ -37,8 +37,15 @@ from modules.compounder import Compounder
 from modules.realtime_monitor import RealtimeMonitor, AnomalyEvent
 from modules.arbitrage import ArbitrageDetector, run_arbitrage_scan
 from modules.market_maker import MarketMaker
+from modules.startup import run_startup_checks
+from modules.cost_tracker import get_cost_tracker
 
 logger = logging.getLogger("predict-market-bot")
+
+# ─── Graceful shutdown ───
+_shutdown_event = asyncio.Event() if hasattr(asyncio, 'Event') else None
+_market_maker: MarketMaker | None = None
+_realtime_monitor: RealtimeMonitor | None = None
 
 KILL_SWITCH = get_setting("general", "kill_switch_file") or "STOP"
 
@@ -379,7 +386,41 @@ async def run_scheduled():
         await asyncio.sleep(interval * 60)
 
 
+async def graceful_shutdown(sig_name: str = ""):
+    """Clean shutdown: cancel MM quotes, close WebSockets, save state."""
+    global _market_maker, _realtime_monitor
+    logger.info(f"Shutdown initiated{f' ({sig_name})' if sig_name else ''}...")
+
+    if _market_maker:
+        await _market_maker.cancel_all()
+        logger.info("Market-making quotes cancelled")
+
+    if _realtime_monitor:
+        await _realtime_monitor.stop()
+        logger.info("WebSocket connections closed")
+
+    # Print final cost report
+    tracker = get_cost_tracker()
+    print(f"\n{tracker.report()}")
+
+    logger.info("Shutdown complete")
+
+
+def _handle_signal(sig, frame):
+    """Signal handler for SIGINT/SIGTERM."""
+    print(f"\nReceived {sig.name}, shutting down gracefully...")
+    loop = asyncio.get_event_loop()
+    if loop.is_running():
+        loop.create_task(graceful_shutdown(sig.name))
+        # Give cleanup tasks 5 seconds then exit
+        loop.call_later(5, sys.exit, 0)
+    else:
+        sys.exit(0)
+
+
 def main():
+    import signal as sig
+
     parser = argparse.ArgumentParser(description="Prediction Market Trading Bot")
     parser.add_argument("--step", choices=["scan", "research", "predict", "execute", "all"],
                        default="all", help="Pipeline step to run up to")
@@ -392,6 +433,9 @@ def main():
     parser.add_argument("--market-make", action="store_true",
                        help="Run market-making strategy (earn spreads)")
     parser.add_argument("--status", action="store_true", help="Show portfolio status")
+    parser.add_argument("--costs", action="store_true", help="Show today's API cost report")
+    parser.add_argument("--skip-checks", action="store_true",
+                       help="Skip startup validation (not recommended)")
     parser.add_argument("--top", type=int, default=10, help="Number of top markets to process")
     parser.add_argument("--discovery-interval", type=int, default=30,
                        help="Minutes between market discovery scans (realtime mode)")
@@ -399,6 +443,11 @@ def main():
 
     setup_logging()
 
+    # Register signal handlers for graceful shutdown
+    sig.signal(sig.SIGINT, _handle_signal)
+    sig.signal(sig.SIGTERM, _handle_signal)
+
+    # Quick info commands (no startup checks needed)
     if args.review:
         compounder = Compounder()
         print(compounder.nightly_review())
@@ -407,11 +456,27 @@ def main():
     if args.status:
         manager = RiskManager()
         print(manager.status_report())
+        tracker = get_cost_tracker()
+        print(f"\n{tracker.report()}")
         metrics = Compounder().current_metrics()
         if metrics.total_trades > 0:
             print(f"\n{metrics.summary()}")
         return
 
+    if args.costs:
+        tracker = get_cost_tracker()
+        print(tracker.report())
+        return
+
+    # ─── Startup validation ───
+    if not args.skip_checks:
+        ready = asyncio.run(run_startup_checks())
+        if not ready:
+            print("\nStartup checks failed. Fix the issues above or use --skip-checks to bypass.")
+            sys.exit(1)
+        print()
+
+    # ─── Run selected mode ───
     if args.arbitrage:
         asyncio.run(run_arbitrage(top_markets=args.top))
     elif args.market_make:
@@ -425,6 +490,11 @@ def main():
         asyncio.run(run_scheduled())
     else:
         asyncio.run(run_pipeline(step=args.step, top_markets=args.top))
+
+    # Print cost summary on exit
+    tracker = get_cost_tracker()
+    if tracker.daily_cost > 0:
+        print(f"\n{tracker.report()}")
 
 
 if __name__ == "__main__":
