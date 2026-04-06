@@ -123,7 +123,7 @@ class LLMPredictor:
                     "content-type": "application/json",
                 },
                 json={
-                    "model": "claude-sonnet-4-20250514",
+                    "model": "claude-opus-4-20250514",
                     "max_tokens": 300,
                     "messages": [{"role": "user", "content": prompt}],
                 },
