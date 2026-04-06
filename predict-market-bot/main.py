@@ -2,6 +2,7 @@
 Prediction Market Trading Bot - Main Orchestrator
 
 Runs the 5-step pipeline: Scan → Research → Predict → Risk/Execute → Compound
+Plus: Arbitrage detection, Market making, Real-time monitoring
 
 Modes:
     python main.py                  # Run full pipeline once
@@ -11,6 +12,8 @@ Modes:
     python main.py --review         # Run nightly review
     python main.py --schedule       # Run on a schedule (every 30 min)
     python main.py --realtime       # RECOMMENDED: WebSocket + scheduled hybrid
+    python main.py --arbitrage      # Scan for cross-platform arbitrage
+    python main.py --market-make    # Run market-making strategy
     python main.py --status         # Show portfolio status
 """
 
@@ -32,6 +35,8 @@ from modules.predictor import EnsemblePredictor, run_predictions
 from modules.risk_executor import RiskManager, run_execution
 from modules.compounder import Compounder
 from modules.realtime_monitor import RealtimeMonitor, AnomalyEvent
+from modules.arbitrage import ArbitrageDetector, run_arbitrage_scan
+from modules.market_maker import MarketMaker
 
 logger = logging.getLogger("predict-market-bot")
 
@@ -288,6 +293,69 @@ async def run_realtime(top_markets: int = 10, discovery_interval_min: int = 30):
     )
 
 
+async def run_arbitrage(top_markets: int = 20):
+    """
+    Scan for cross-platform arbitrage opportunities.
+    Looks for price discrepancies between Polymarket and Kalshi on the same events.
+    """
+    print("=" * 60)
+    print("CROSS-PLATFORM ARBITRAGE SCAN")
+    print("=" * 60)
+
+    scanner = MarketScanner()
+    markets = await scanner.scan()
+
+    poly_markets = [m for m in markets if m.platform == "polymarket"]
+    kalshi_markets = [m for m in markets if m.platform == "kalshi"]
+
+    print(f"Polymarket: {len(poly_markets)} | Kalshi: {len(kalshi_markets)}")
+
+    if not poly_markets or not kalshi_markets:
+        print("Need markets from both platforms to detect arbitrage.")
+        return
+
+    detector = ArbitrageDetector()
+    opportunities = detector.scan_for_arbitrage(poly_markets, kalshi_markets)
+    print(detector.report())
+
+    if opportunities:
+        paper_trading = get_setting("general", "paper_trading", default=True)
+        bankroll = get_setting("general", "initial_bankroll") or 500.0
+        for opp in opportunities[:3]:  # Execute top 3
+            result = await detector.execute_arbitrage(opp, bankroll, paper_trading=paper_trading)
+            status = "EXECUTED" if result.get("success") else "FAILED"
+            print(f"  [{status}] {opp.strategy} | ${result.get('expected_profit', 0):.2f} profit")
+
+
+async def run_market_making(top_markets: int = 10):
+    """
+    Run market-making strategy: provide liquidity and earn spreads.
+    """
+    print("=" * 60)
+    print("MARKET MAKING MODE")
+    print("=" * 60)
+    print(f"  Paper trading: {get_setting('general', 'paper_trading', default=True)}")
+    print(f"  Kill switch: {KILL_SWITCH}")
+    print("  Press Ctrl+C to stop.\n")
+
+    scanner = MarketScanner()
+    markets = await scanner.scan()
+
+    maker = MarketMaker()
+    suitable = maker.select_markets(markets[:top_markets * 2])
+
+    if not suitable:
+        print("No markets suitable for market making right now.")
+        return
+
+    print(f"Making markets on {len(suitable)} markets:\n")
+    for m in suitable:
+        print(f"  {m.title[:50]} | Price: {m.current_price:.2f} | Vol: {m.volume_24h:.0f}")
+    print()
+
+    await maker.run(suitable)
+
+
 async def run_scheduled():
     """Run the pipeline on a schedule (polling mode, no WebSocket)."""
     interval = get_setting("scanner", "schedule_interval_minutes") or 30
@@ -319,6 +387,10 @@ def main():
     parser.add_argument("--schedule", action="store_true", help="Run on polling schedule")
     parser.add_argument("--realtime", action="store_true",
                        help="RECOMMENDED: WebSocket real-time + scheduled discovery")
+    parser.add_argument("--arbitrage", action="store_true",
+                       help="Scan for cross-platform arbitrage opportunities")
+    parser.add_argument("--market-make", action="store_true",
+                       help="Run market-making strategy (earn spreads)")
     parser.add_argument("--status", action="store_true", help="Show portfolio status")
     parser.add_argument("--top", type=int, default=10, help="Number of top markets to process")
     parser.add_argument("--discovery-interval", type=int, default=30,
@@ -340,7 +412,11 @@ def main():
             print(f"\n{metrics.summary()}")
         return
 
-    if args.realtime:
+    if args.arbitrage:
+        asyncio.run(run_arbitrage(top_markets=args.top))
+    elif args.market_make:
+        asyncio.run(run_market_making(top_markets=args.top))
+    elif args.realtime:
         asyncio.run(run_realtime(
             top_markets=args.top,
             discovery_interval_min=args.discovery_interval,

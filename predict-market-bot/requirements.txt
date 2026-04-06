@@ -42,3 +42,6 @@ loguru>=0.7.0
 
 # Rate Limiting
 ratelimit>=2.2.1
+
+# Fuzzy text matching (arbitrage market pairing)
+rapidfuzz>=3.6.0

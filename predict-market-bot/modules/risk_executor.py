@@ -246,10 +246,114 @@ class TradeExecutor:
             return False, "", f"Kalshi execution error: {e}"
 
 
+class CorrelationTracker:
+    """
+    Tracks correlations between markets to prevent hidden concentration risk.
+
+    If you bet on "Biden wins" AND "Democrats win Senate", those are ~80% correlated.
+    Independent Kelly sizing would over-allocate to effectively the same bet.
+
+    Groups correlated markets and applies a shared position cap.
+    """
+
+    CORRELATION_THRESHOLD = 0.5  # Markets above this are considered correlated
+
+    def __init__(self):
+        self.keyword_index: dict[str, list[str]] = {}  # keyword -> [market_ids]
+        self.correlation_groups: dict[str, set[str]] = {}  # group_id -> {market_ids}
+
+    def register_position(self, market_id: str, market_title: str):
+        """Index a market's keywords for correlation detection."""
+        stopwords = {"will", "the", "be", "a", "an", "in", "on", "at", "to", "by", "of", "for",
+                     "is", "or", "and", "before", "after", "yes", "no"}
+        keywords = [
+            w.lower().strip("?.,!") for w in market_title.split()
+            if w.lower().strip("?.,!") not in stopwords and len(w) > 2
+        ]
+        for kw in keywords:
+            if kw not in self.keyword_index:
+                self.keyword_index[kw] = []
+            if market_id not in self.keyword_index[kw]:
+                self.keyword_index[kw].append(market_id)
+
+    def estimate_correlation(self, market_id_a: str, title_a: str,
+                              market_id_b: str, title_b: str) -> float:
+        """
+        Estimate correlation between two markets based on keyword overlap.
+        Returns 0-1 score. Higher = more correlated.
+        """
+        stopwords = {"will", "the", "be", "a", "an", "in", "on", "at", "to", "by", "of", "for",
+                     "is", "or", "and", "before", "after", "yes", "no"}
+        words_a = {w.lower().strip("?.,!") for w in title_a.split()
+                   if w.lower().strip("?.,!") not in stopwords and len(w) > 2}
+        words_b = {w.lower().strip("?.,!") for w in title_b.split()
+                   if w.lower().strip("?.,!") not in stopwords and len(w) > 2}
+
+        if not words_a or not words_b:
+            return 0.0
+
+        overlap = words_a & words_b
+        total = words_a | words_b
+        return len(overlap) / len(total) if total else 0.0
+
+    def get_correlated_exposure(self, market_title: str,
+                                  open_positions: list[Position]) -> float:
+        """
+        Calculate total exposure in positions correlated with this market.
+        Returns total USD exposure in correlated positions.
+        """
+        correlated_exposure = 0.0
+
+        for pos in open_positions:
+            correlation = self.estimate_correlation(
+                "new", market_title,
+                pos.market_id, pos.market_title,
+            )
+            if correlation >= self.CORRELATION_THRESHOLD:
+                correlated_exposure += pos.size_usd
+
+        return correlated_exposure
+
+    def scale_for_correlation(self, proposed_size: float, market_title: str,
+                                open_positions: list[Position],
+                                bankroll: float, max_position_pct: float) -> tuple[float, str]:
+        """
+        Scale down a position if correlated positions already exist.
+        Returns (adjusted_size, reason).
+        """
+        correlated_exposure = self.get_correlated_exposure(market_title, open_positions)
+        max_correlated = bankroll * max_position_pct
+
+        if correlated_exposure <= 0:
+            return proposed_size, ""
+
+        total_if_added = correlated_exposure + proposed_size
+        if total_if_added <= max_correlated:
+            return proposed_size, ""
+
+        # Scale down to fit within the correlated cap
+        remaining = max(0, max_correlated - correlated_exposure)
+        if remaining <= 0:
+            return 0.0, (
+                f"Correlated exposure ${correlated_exposure:.2f} already at cap "
+                f"${max_correlated:.2f} — blocking trade"
+            )
+
+        scale_factor = remaining / proposed_size
+        adjusted = proposed_size * scale_factor
+        reason = (
+            f"Scaled {scale_factor:.0%}: correlated exposure ${correlated_exposure:.2f} + "
+            f"${adjusted:.2f} = ${correlated_exposure + adjusted:.2f} "
+            f"(cap ${max_correlated:.2f})"
+        )
+        return adjusted, reason
+
+
 class RiskManager:
     """
     Orchestrates risk checks, position sizing, and trade execution.
     The gatekeeper between signals and real money.
+    Now includes correlation-aware position sizing.
     """
 
     def __init__(self):
@@ -257,12 +361,17 @@ class RiskManager:
         self.executor = TradeExecutor(
             paper_trading=get_setting("general", "paper_trading", default=True)
         )
+        self.correlation = CorrelationTracker()
         self.kelly_fraction = get_setting("risk", "kelly_fraction") or 0.25
         self.max_position_pct = get_setting("risk", "max_position_pct", default=5.0) / 100
         self.max_drawdown = get_setting("risk", "max_drawdown_pct", default=8.0) / 100
         self.max_daily_loss = get_setting("risk", "max_daily_loss_pct", default=15.0) / 100
         self.max_positions = get_setting("risk", "max_concurrent_positions") or 15
         self.max_api_cost = get_setting("risk", "max_daily_api_cost_usd") or 50.0
+
+        # Register existing positions for correlation tracking
+        for pos in self.portfolio.open_positions:
+            self.correlation.register_position(pos.market_id, pos.market_title)
 
     def check_kill_switch(self) -> bool:
         """Check if the kill switch file exists."""
@@ -272,7 +381,7 @@ class RiskManager:
         return False
 
     async def process_signal(self, signal: TradeSignal) -> ExecutionResult:
-        """Process a trade signal through full risk pipeline."""
+        """Process a trade signal through full risk pipeline with correlation checks."""
         market = signal.market
 
         # Kill switch check
@@ -299,11 +408,33 @@ class RiskManager:
                 reason="Kelly says no bet (no edge)",
             )
 
+        # ─── Correlation-aware sizing ───
+        adjusted_size, corr_reason = self.correlation.scale_for_correlation(
+            proposed_size=kelly.position_size_usd,
+            market_title=market.title,
+            open_positions=self.portfolio.open_positions,
+            bankroll=self.portfolio.bankroll,
+            max_position_pct=self.max_position_pct,
+        )
+
+        if adjusted_size <= 0:
+            return ExecutionResult(
+                success=False,
+                kelly_result=kelly,
+                reason=f"Correlation block: {corr_reason}",
+            )
+
+        if corr_reason:
+            logger.info(f"Correlation adjustment: {corr_reason}")
+
+        # Use adjusted size for risk validation
+        position_size = adjusted_size
+
         # Run risk validation
         risk_result = validate_risk(
             p_model=signal.predicted_probability,
             p_market=signal.market_price,
-            position_size_usd=kelly.position_size_usd,
+            position_size_usd=position_size,
             bankroll=self.portfolio.bankroll,
             current_exposure_usd=self.portfolio.current_exposure,
             daily_pnl_usd=self.portfolio.daily_pnl,
@@ -338,11 +469,11 @@ class RiskManager:
             market_id=market.market_id,
             side=side,
             price=price,
-            size_usd=kelly.position_size_usd,
+            size_usd=position_size,
         )
 
         if success:
-            contracts = int(kelly.position_size_usd / price) if price > 0 else 0
+            contracts = int(position_size / price) if price > 0 else 0
             position = Position(
                 position_id=order_id,
                 platform=market.platform,
@@ -350,11 +481,16 @@ class RiskManager:
                 market_title=market.title,
                 side=side,
                 entry_price=price,
-                size_usd=kelly.position_size_usd,
+                size_usd=position_size,
                 contracts=contracts,
                 predicted_prob=signal.predicted_probability,
             )
             self.portfolio.add_position(position)
+            self.correlation.register_position(market.market_id, market.title)
+
+            reason_full = reason
+            if corr_reason:
+                reason_full += f" | {corr_reason}"
 
             return ExecutionResult(
                 success=True,
@@ -362,7 +498,7 @@ class RiskManager:
                 risk_validation=risk_result,
                 kelly_result=kelly,
                 order_id=order_id,
-                reason=reason,
+                reason=reason_full,
             )
         else:
             return ExecutionResult(
@@ -388,8 +524,6 @@ class RiskManager:
     async def monitor_positions(self):
         """Monitor open positions for hedging/exit conditions."""
         for position in self.portfolio.open_positions:
-            # Check if market price has moved significantly
-            # In production, this would fetch current price and compare
             logger.debug(f"Monitoring: {position.market_title[:40]} - {position.status}")
 
     def status_report(self) -> str:

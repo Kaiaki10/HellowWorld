@@ -199,18 +199,85 @@ class RSSFetcher:
         return results[:max_results]
 
 
+class ResearchCache:
+    """
+    Caches ResearchBriefs to avoid redundant scraping and sentiment analysis.
+    If a market's price moved < 2% since last research, reuse the cached brief.
+    """
+
+    def __init__(self, cache_ttl_seconds: int = 900):  # 15 min default TTL
+        self.cache: dict[str, dict] = {}  # market_id -> {brief, price, timestamp}
+        self.cache_ttl = cache_ttl_seconds
+        self.price_change_threshold = 0.02  # 2% price change invalidates cache
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, market: Market) -> Optional[ResearchBrief]:
+        """Return cached brief if still valid, else None."""
+        key = f"{market.platform}:{market.market_id}"
+        entry = self.cache.get(key)
+        if entry is None:
+            self.misses += 1
+            return None
+
+        # Check TTL
+        age = (datetime.now(timezone.utc) - entry["timestamp"]).total_seconds()
+        if age > self.cache_ttl:
+            self.misses += 1
+            del self.cache[key]
+            return None
+
+        # Check price change
+        cached_price = entry["price"]
+        if cached_price > 0:
+            price_change = abs(market.current_price - cached_price) / cached_price
+            if price_change > self.price_change_threshold:
+                self.misses += 1
+                del self.cache[key]
+                return None
+
+        self.hits += 1
+        brief = entry["brief"]
+        # Update the market reference to current prices
+        brief.market = market
+        brief.market_price = market.current_price
+        brief.gap = brief.narrative_probability - market.current_price
+        logger.debug(f"Cache HIT: {market.title[:40]} (age {age:.0f}s)")
+        return brief
+
+    def put(self, market: Market, brief: ResearchBrief):
+        key = f"{market.platform}:{market.market_id}"
+        self.cache[key] = {
+            "brief": brief,
+            "price": market.current_price,
+            "timestamp": datetime.now(timezone.utc),
+        }
+
+    def stats(self) -> str:
+        total = self.hits + self.misses
+        rate = self.hits / total if total > 0 else 0
+        return f"Research cache: {self.hits}/{total} hits ({rate:.0%}), {len(self.cache)} entries"
+
+
 class MarketResearcher:
     """
     Orchestrates research across multiple sources for a given market.
     Produces a ResearchBrief with sentiment analysis and gap detection.
+    Uses caching to avoid redundant API calls when prices haven't moved.
     """
 
     def __init__(self):
         self.sentiment = SentimentAnalyzer()
         self.max_sources = get_setting("research", "max_sources_per_market") or 20
+        self.cache = ResearchCache(cache_ttl_seconds=900)
 
     async def research_market(self, market: Market) -> ResearchBrief:
-        """Research a single market across all sources."""
+        """Research a single market, using cache when available."""
+        # Check cache first
+        cached = self.cache.get(market)
+        if cached is not None:
+            return cached
+
         logger.info(f"Researching: {market.title[:50]}...")
 
         # Build search query from market title
@@ -246,11 +313,15 @@ class MarketResearcher:
 
         # Build the research brief
         brief = self._build_brief(market, sources)
+
+        # Cache it
+        self.cache.put(market, brief)
+
         logger.info(f"Research complete: {brief.summary()}")
         return brief
 
     async def research_markets(self, markets: list[Market], max_concurrent: int = 5) -> list[ResearchBrief]:
-        """Research multiple markets with concurrency control."""
+        """Research multiple markets with concurrency control and caching."""
         semaphore = asyncio.Semaphore(max_concurrent)
 
         async def _bounded_research(m: Market) -> ResearchBrief:
@@ -258,6 +329,7 @@ class MarketResearcher:
                 return await self.research_market(m)
 
         briefs = await asyncio.gather(*[_bounded_research(m) for m in markets])
+        logger.info(self.cache.stats())
         return list(briefs)
 
     def _build_query(self, title: str) -> str:
