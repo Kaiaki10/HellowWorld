@@ -116,6 +116,10 @@ specialists:
   politics:
     # Polling data weight when found
     poll_weight: 0.60
+  economics:
+    # FRED API is free (120 req/min, set FRED_API_KEY in .env)
+    data_weight: 0.70           # Hard economic data is highly predictive
+    leading_indicator_weight: 0.60
 
 # ============================================================
 # General Settings

@@ -44,6 +44,7 @@ from modules.specialists.politics import PoliticsSpecialist
 from modules.specialists.weather import WeatherSpecialist
 from modules.specialists.sports import SportsSpecialist
 from modules.specialists.crypto import CryptoSpecialist
+from modules.specialists.economics import EconomicsSpecialist
 
 logger = logging.getLogger("predict-market-bot")
 
@@ -62,6 +63,7 @@ def _build_specialist_registry() -> SpecialistRegistry:
     registry.register(WeatherSpecialist())
     registry.register(SportsSpecialist())
     registry.register(CryptoSpecialist())
+    registry.register(EconomicsSpecialist())
     return registry
 
 
