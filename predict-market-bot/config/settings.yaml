@@ -17,7 +17,7 @@ platforms:
 # Step 1: Scanner Settings
 # ============================================================
 scanner:
-  schedule_interval_minutes: 15
+  schedule_interval_minutes: 30
   filters:
     min_volume: 200           # Minimum 200 contracts
     max_days_to_expiry: 30    # Max 30 days to resolution
@@ -82,6 +82,18 @@ compound:
     win_rate: 0.60
     sharpe_ratio: 2.0
     profit_factor: 1.5
+
+# ============================================================
+# Real-Time Monitor Settings
+# ============================================================
+realtime:
+  enabled: true
+  anomaly_cooldown_seconds: 120   # Min 2 min between triggers per market
+  price_spike_threshold_pct: 5.0  # Trigger on >5% instant move
+  spread_blow_threshold: 0.05     # Trigger on spread >5 cents
+  rapid_move_threshold_pct: 10.0  # Trigger on >10% over rolling window
+  volume_surge_ratio: 3.0         # Trigger on 3x average volume
+  discovery_interval_minutes: 30  # Scan for new markets every 30 min
 
 # ============================================================
 # General Settings
