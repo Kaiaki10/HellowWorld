@@ -39,6 +39,12 @@ from modules.arbitrage import ArbitrageDetector, run_arbitrage_scan
 from modules.market_maker import MarketMaker
 from modules.startup import run_startup_checks
 from modules.cost_tracker import get_cost_tracker
+from modules.specialists import SpecialistRegistry
+from modules.specialists.politics import PoliticsSpecialist
+from modules.specialists.weather import WeatherSpecialist
+from modules.specialists.sports import SportsSpecialist
+from modules.specialists.crypto import CryptoSpecialist
+from modules.specialists.economics import EconomicsSpecialist
 
 logger = logging.getLogger("predict-market-bot")
 
@@ -48,6 +54,17 @@ _market_maker: MarketMaker | None = None
 _realtime_monitor: RealtimeMonitor | None = None
 
 KILL_SWITCH = get_setting("general", "kill_switch_file") or "STOP"
+
+
+def _build_specialist_registry() -> SpecialistRegistry:
+    """Register all market vertical specialists."""
+    registry = SpecialistRegistry()
+    registry.register(PoliticsSpecialist())
+    registry.register(WeatherSpecialist())
+    registry.register(SportsSpecialist())
+    registry.register(CryptoSpecialist())
+    registry.register(EconomicsSpecialist())
+    return registry
 
 
 def setup_logging():
@@ -114,14 +131,30 @@ async def run_pipeline(step: str = "all", top_markets: int = 10) -> list[Market]
             for w in warnings:
                 print(f"      {w}")
 
-    # ─── Step 2: Research ───
+    # ─── Step 2: Research (with specialist routing) ───
     print("\n" + "=" * 60)
-    print("STEP 2: RESEARCHING TOP MARKETS")
+    print("STEP 2: RESEARCHING TOP MARKETS (specialist-routed)")
     print("=" * 60)
 
+    registry = _build_specialist_registry()
     researcher = MarketResearcher()
-    briefs = await researcher.research_markets(markets[:top_markets])
+    briefs = []
+    specialist_contexts = {}  # market_id → specialist prompt context
 
+    for market in markets[:top_markets]:
+        specialist, classification = registry.route(market)
+        if specialist:
+            logger.info(f"Specialist [{classification.category}] → {market.title[:40]}")
+            print(f"  [{classification.category.upper():10s}] {market.title[:50]}")
+            brief = await specialist.research(market)
+            specialist_contexts[market.market_id] = specialist.get_model_prompt_context(market, brief)
+        else:
+            logger.info(f"General pipeline → {market.title[:40]}")
+            print(f"  [{'GENERAL':10s}] {market.title[:50]}")
+            brief = await researcher.research_market(market)
+        briefs.append(brief)
+
+    print()
     for brief in briefs:
         print(brief.summary())
         print()
@@ -129,13 +162,13 @@ async def run_pipeline(step: str = "all", top_markets: int = 10) -> list[Market]
     if step == "research":
         return markets
 
-    # ─── Step 3: Predict ───
+    # ─── Step 3: Predict (with specialist context) ───
     print("\n" + "=" * 60)
     print("STEP 3: GENERATING PREDICTIONS")
     print("=" * 60)
 
     predictor = EnsemblePredictor()
-    signals = await predictor.predict_batch(briefs)
+    signals = await predictor.predict_batch(briefs, specialist_contexts=specialist_contexts)
 
     tradeable = [s for s in signals if s.signal != "no_trade"]
     print(f"\nTrade signals: {len(tradeable)} actionable from {len(signals)} analyzed\n")
@@ -192,14 +225,24 @@ async def run_pipeline_for_market(market: Market):
     if warnings:
         logger.info(f"Knowledge base warnings for '{market.title[:40]}': {len(warnings)}")
 
-    # Research
-    researcher = MarketResearcher()
-    brief = await researcher.research_market(market)
+    # Research (specialist-routed)
+    registry = _build_specialist_registry()
+    specialist, classification = registry.route(market)
+    specialist_context = None
+
+    if specialist:
+        logger.info(f"Specialist [{classification.category}] → {market.title[:40]}")
+        brief = await specialist.research(market)
+        specialist_context = specialist.get_model_prompt_context(market, brief)
+    else:
+        researcher = MarketResearcher()
+        brief = await researcher.research_market(market)
     logger.info(f"Research: {brief.summary()}")
 
-    # Predict
+    # Predict (with specialist context)
     predictor = EnsemblePredictor()
-    signal = await predictor.predict(brief)
+    specialist_contexts = {market.market_id: specialist_context} if specialist_context else {}
+    signal = await predictor.predict(brief, specialist_context=specialist_context)
     logger.info(f"Prediction: {signal.summary()}")
 
     if signal.signal == "no_trade":
