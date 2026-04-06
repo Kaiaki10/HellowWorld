@@ -96,6 +96,28 @@ realtime:
   discovery_interval_minutes: 30  # Scan for new markets every 30 min
 
 # ============================================================
+# Specialist Bot Settings
+# ============================================================
+specialists:
+  enabled: true
+  # Each specialist auto-routes markets by keyword classification
+  # Confidence threshold for specialist routing (below this → general pipeline)
+  routing_confidence_threshold: 0.3
+  weather:
+    # Open-Meteo API is free, no key needed
+    forecast_days: 7
+    confidence_boost: 0.80   # Weather models are very reliable
+  sports:
+    # The Odds API (free tier: 500 req/month, set ODDS_API_KEY in .env)
+    odds_weight: 0.65        # Bookmaker odds are highly efficient
+  crypto:
+    # CoinGecko API is free, no key needed
+    price_weight: 0.60
+  politics:
+    # Polling data weight when found
+    poll_weight: 0.60
+
+# ============================================================
 # General Settings
 # ============================================================
 general:

@@ -411,7 +411,7 @@ class EnsemblePredictor:
         self.llm_predictor = LLMPredictor()
         self.calibration = PerModelCalibration()
 
-    async def predict(self, brief: ResearchBrief) -> TradeSignal:
+    async def predict(self, brief: ResearchBrief, specialist_context: str = None) -> TradeSignal:
         """Generate a trade signal with tiered model routing."""
         market = brief.market
         predictions: list[ModelPrediction] = []
@@ -430,6 +430,10 @@ class EnsemblePredictor:
             f"Sources: {len(brief.sources)} analyzed\n"
             f"Current market price: {brief.market_price:.3f}"
         )
+
+        # Inject specialist context if available (gives LLMs domain-specific guidance)
+        if specialist_context:
+            research_summary = f"{specialist_context}\n{research_summary}"
 
         if stat_edge < TIER_SKIP:
             # ─── SKIP TIER: No edge worth investigating ───
@@ -509,14 +513,17 @@ class EnsemblePredictor:
         logger.info(f"Prediction: {trade_signal.summary()}")
         return trade_signal
 
-    async def predict_batch(self, briefs: list[ResearchBrief]) -> list[TradeSignal]:
+    async def predict_batch(self, briefs: list[ResearchBrief],
+                            specialist_contexts: dict[str, str] = None) -> list[TradeSignal]:
         """Generate trade signals for multiple markets."""
         signals = []
         total_cost = 0.0
         tier_counts = {"skip": 0, "cheap": 0, "full": 0}
+        specialist_contexts = specialist_contexts or {}
 
         for brief in briefs:
-            signal = await self.predict(brief)
+            context = specialist_contexts.get(brief.market.market_id)
+            signal = await self.predict(brief, specialist_context=context)
             signals.append(signal)
             total_cost += signal.estimated_cost
             tier_counts[signal.tier_used] = tier_counts.get(signal.tier_used, 0) + 1
